@@ -1,0 +1,138 @@
+# Driver_worker_drowsinessApp
+Detect unsafe behavior of worker at factory or driver in vehicle. 
+# driver_drowsiness_detection.py
+import winsound
+import cv2
+import dlib
+import time
+import numpy as np
+from scipy.spatial import distance
+from imutils import face_utils
+import threading
+
+# === Helper Functions ===
+def eye_aspect_ratio(eye):
+    A = distance.euclidean(eye[1], eye[5])
+    B = distance.euclidean(eye[2], eye[4])
+    C = distance.euclidean(eye[0], eye[3])
+    return (A + B) / (2.0 * C)
+
+def mouth_aspect_ratio(mouth):
+    A = distance.euclidean(mouth[13], mouth[19])  # top lip to bottom lip
+    B = distance.euclidean(mouth[14], mouth[18])
+    C = distance.euclidean(mouth[15], mouth[17])
+    D = distance.euclidean(mouth[12], mouth[16])  # left corner to right corner
+    mar = (A + B + C) / (3.0 * D)
+    return mar
+
+# === Alarm Function ===
+def sound_alarm():
+    for _ in range(3):
+        winsound.Beep(2500, 700)  # frequency=2500 Hz, duration=700 ms
+        time.sleep(0.3)
+
+# === Thresholds ===
+EYE_AR_THRESH = 0.25
+EYE_AR_CONSEC_FRAMES = 20
+MOUTH_AR_THRESH = 0.6  # Yawn detection threshold
+YAWN_CONSEC_FRAMES = 15
+
+# === Initialize variables ===
+COUNTER = 0
+YAWN_COUNTER = 0
+BLINK_COUNT = 0
+ALARM_ON = False
+last_blink_time = time.time()
+fatigue_score = 0
+
+# === Load Dlib models ===
+print("[INFO] Loading face detector and landmark predictor...")
+detector = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+
+(lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
+(rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
+(mStart, mEnd) = face_utils.FACIAL_LANDMARKS_IDXS["mouth"]
+
+# === Start webcam ===
+print("[INFO] Starting video stream...")
+vs = cv2.VideoCapture(0)
+time.sleep(1.0)
+
+while True:
+    ret, frame = vs.read()
+    if not ret:
+        break
+
+    frame = cv2.resize(frame, (640, 480))
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    rects = detector(gray, 0)
+
+    for rect in rects:
+        shape = predictor(gray, rect)
+        shape = face_utils.shape_to_np(shape)
+
+        # Extract eye and mouth regions
+        leftEye = shape[lStart:lEnd]
+        rightEye = shape[rStart:rEnd]
+        mouth = shape[mStart:mEnd]
+
+        leftEAR = eye_aspect_ratio(leftEye)
+        rightEAR = eye_aspect_ratio(rightEye)
+        ear = (leftEAR + rightEAR) / 2.0
+        mar = mouth_aspect_ratio(mouth)
+
+        # Draw contours
+        cv2.drawContours(frame, [cv2.convexHull(leftEye)], -1, (0, 255, 0), 1)
+        cv2.drawContours(frame, [cv2.convexHull(rightEye)], -1, (0, 255, 0), 1)
+        cv2.drawContours(frame, [cv2.convexHull(mouth)], -1, (255, 255, 0), 1)
+
+        # Drowsiness check
+        if ear < EYE_AR_THRESH:
+            COUNTER += 1
+            if COUNTER >= EYE_AR_CONSEC_FRAMES:
+                if not ALARM_ON:
+                    ALARM_ON = True
+                    threading.Thread(target=sound_alarm, daemon=True).start()
+
+                cv2.putText(frame, "DROWSINESS ALERT!", (100, 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+        else:
+            if 2 <= COUNTER < EYE_AR_CONSEC_FRAMES:
+                BLINK_COUNT += 1
+                last_blink_time = time.time()
+            COUNTER = 0
+            ALARM_ON = False
+
+        # Yawning detection
+        if mar > MOUTH_AR_THRESH:
+            YAWN_COUNTER += 1
+            cv2.putText(frame, "YAWNING!", (220, 420),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 3)
+        else:
+            if YAWN_COUNTER >= YAWN_CONSEC_FRAMES:
+                fatigue_score += 1
+            YAWN_COUNTER = 0
+
+        # Fatigue score
+        if time.time() - last_blink_time > 60:
+            fatigue_score += 1
+            last_blink_time = time.time()
+
+        # === Display Info ===
+        cv2.putText(frame, f"EAR: {ear:.2f}", (30, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, f"MAR: {mar:.2f}", (30, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, f"Blinks: {BLINK_COUNT}", (30, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(frame, f"Fatigue Score: {fatigue_score}", (30, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+
+    cv2.imshow("Driver Drowsiness Detection", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+vs.release()
+cv2.destroyAllWindows()
